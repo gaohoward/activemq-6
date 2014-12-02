@@ -158,4 +158,6 @@ public interface ServerSession
                           SimpleString filterString) throws Exception;
 
    List<MessageReference> getInTXMessagesForConsumer(long consumerId);
+
+   SimpleString getForcedDeliveryMessageHeader();
 }

@@ -101,6 +101,7 @@ import org.apache.activemq.core.server.ActiveMQServerLogger;
 import org.apache.activemq.spi.core.protocol.RemotingConnection;
 import org.apache.activemq.spi.core.remoting.Acceptor;
 import org.apache.activemq.spi.core.remoting.Connection;
+import org.apache.activemq.utils.ClientType;
 import org.apache.activemq.utils.ConcurrentHashSet;
 
 /**
@@ -1766,4 +1767,11 @@ public class OpenWireConnection implements RemotingConnection, CommandVisitor
    {
       return this.state.getContext();
    }
+
+   @Override
+   public ClientType getClientType()
+   {
+      return this.transportConnection.getClientType();
+   }
+
 }

@@ -24,6 +24,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import io.netty.channel.ChannelFutureListener;
+
 import org.apache.activemq.api.core.ActiveMQBuffer;
 import org.apache.activemq.api.core.ActiveMQBuffers;
 import org.apache.activemq.api.core.ActiveMQInterruptedException;
@@ -35,6 +36,7 @@ import org.apache.activemq.spi.core.remoting.BufferHandler;
 import org.apache.activemq.spi.core.remoting.Connection;
 import org.apache.activemq.spi.core.remoting.ConnectionLifeCycleListener;
 import org.apache.activemq.spi.core.remoting.ReadyListener;
+import org.apache.activemq.utils.ClientType;
 import org.apache.activemq.utils.UUIDGenerator;
 
 /**
@@ -298,5 +300,15 @@ public class InVMConnection implements Connection
       return "InVMConnection [serverID=" + serverID + ", id=" + id + "]";
    }
 
+   @Override
+   public void setClientType(ClientType type)
+   {
+   }
+
+   @Override
+   public ClientType getClientType()
+   {
+      return null;
+   }
 
 }

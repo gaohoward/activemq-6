@@ -24,6 +24,7 @@ import org.apache.activemq.core.remoting.CloseListener;
 import org.apache.activemq.core.remoting.FailureListener;
 import org.apache.activemq.spi.core.remoting.BufferHandler;
 import org.apache.activemq.spi.core.remoting.Connection;
+import org.apache.activemq.utils.ClientType;
 
 /**
  * A RemotingConnection is a connection between a client and a server.
@@ -181,5 +182,11 @@ public interface RemotingConnection extends BufferHandler
     * flush all outstanding data from the connection.
     */
    void flush();
+
+   /**
+    * get the client type (old client: HQ, new: AMQ)
+    * @return
+    */
+   ClientType getClientType();
 
 }

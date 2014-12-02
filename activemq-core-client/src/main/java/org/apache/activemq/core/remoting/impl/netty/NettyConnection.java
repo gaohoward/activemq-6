@@ -28,6 +28,7 @@ import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.handler.ssl.SslHandler;
+
 import org.apache.activemq.api.core.ActiveMQBuffer;
 import org.apache.activemq.api.core.ActiveMQBuffers;
 import org.apache.activemq.api.core.ActiveMQInterruptedException;
@@ -39,6 +40,7 @@ import org.apache.activemq.spi.core.protocol.RemotingConnection;
 import org.apache.activemq.spi.core.remoting.Connection;
 import org.apache.activemq.spi.core.remoting.ConnectionLifeCycleListener;
 import org.apache.activemq.spi.core.remoting.ReadyListener;
+import org.apache.activemq.utils.ClientType;
 import org.apache.activemq.utils.ConcurrentHashSet;
 
 /**
@@ -74,7 +76,9 @@ public class NettyConnection implements Connection
 
    private RemotingConnection protocolConnection;
 
-// Static --------------------------------------------------------
+   private ClientType clientType = ClientType.AMQ;
+
+   // Static --------------------------------------------------------
 
    // Constructors --------------------------------------------------
 
@@ -447,6 +451,19 @@ public class NettyConnection implements Connection
          ActiveMQClientLogger.LOGGER.timeoutClosingNettyChannel();
       }
    }
+
+   @Override
+   public void setClientType(ClientType type)
+   {
+      clientType = type;
+   }
+
+   @Override
+   public ClientType getClientType()
+   {
+      return clientType;
+   }
+
    // Inner classes -------------------------------------------------
 
 }

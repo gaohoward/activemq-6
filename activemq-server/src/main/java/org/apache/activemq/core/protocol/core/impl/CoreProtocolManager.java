@@ -24,6 +24,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.RejectedExecutionException;
 
 import io.netty.channel.ChannelPipeline;
+
 import org.apache.activemq.api.core.ActiveMQBuffer;
 import org.apache.activemq.api.core.Interceptor;
 import org.apache.activemq.api.core.Pair;
@@ -56,6 +57,7 @@ import org.apache.activemq.spi.core.protocol.ProtocolManager;
 import org.apache.activemq.spi.core.protocol.RemotingConnection;
 import org.apache.activemq.spi.core.remoting.Acceptor;
 import org.apache.activemq.spi.core.remoting.Connection;
+import org.apache.activemq.utils.ClientType;
 
 /**
  * A CoreProtocolManager
@@ -176,7 +178,22 @@ class CoreProtocolManager implements ProtocolManager
          buffer.getByte(7) == 'Q')
       {
          //todo add some handshaking
+         connection.setClientType(ClientType.AMQ);
          buffer.readBytes(8);
+      }
+      else
+      {
+         connection.setClientType(ClientType.HQ);
+         if (buffer.getByte(0) == 'H' &&
+            buffer.getByte(2) == 'O' &&
+            buffer.getByte(3) == 'R' &&
+            buffer.getByte(4) == 'N' &&
+            buffer.getByte(5) == 'E' &&
+            buffer.getByte(6) == 'T' &&
+            buffer.getByte(7) == 'Q')
+         {
+            buffer.readBytes(7);
+         }
       }
    }
 

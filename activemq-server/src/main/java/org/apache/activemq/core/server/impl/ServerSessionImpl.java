@@ -37,6 +37,7 @@ import org.apache.activemq.api.core.Pair;
 import org.apache.activemq.api.core.SimpleString;
 import org.apache.activemq.api.core.management.CoreNotificationType;
 import org.apache.activemq.api.core.management.ManagementHelper;
+import org.apache.activemq.core.client.impl.ClientConsumerImpl;
 import org.apache.activemq.core.client.impl.ClientMessageImpl;
 import org.apache.activemq.core.exception.ActiveMQXAException;
 import org.apache.activemq.core.filter.Filter;
@@ -78,6 +79,7 @@ import org.apache.activemq.core.transaction.TransactionPropertyIndexes;
 import org.apache.activemq.core.transaction.impl.TransactionImpl;
 import org.apache.activemq.spi.core.protocol.RemotingConnection;
 import org.apache.activemq.spi.core.protocol.SessionCallback;
+import org.apache.activemq.utils.ClientType;
 import org.apache.activemq.utils.TypedProperties;
 import org.apache.activemq.utils.UUID;
 import org.apache.activemq.utils.json.JSONArray;
@@ -173,6 +175,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener
 
    private final TransactionFactory transactionFactory;
 
+   private final SimpleString forcedDeliveryMessageHeader;
    // Constructors ---------------------------------------------------------------------------------
 
    //create an 'empty' session. Only used by AMQServerSession
@@ -197,6 +200,7 @@ public class ServerSessionImpl implements ServerSession, FailureListener
       this.managementAddress = null;
       this.context = null;
       this.callback = null;
+      this.forcedDeliveryMessageHeader = ClientConsumerImpl.FORCED_DELIVERY_MESSAGE;
    }
 
    public ServerSessionImpl(final String name,
@@ -263,6 +267,17 @@ public class ServerSessionImpl implements ServerSession, FailureListener
       this.preAcknowledge = preAcknowledge;
 
       this.remotingConnection = remotingConnection;
+
+      ClientType clientType = this.remotingConnection.getClientType();
+      if (clientType == ClientType.HQ)
+      {
+         //we have an old hornetq client
+         this.forcedDeliveryMessageHeader = new SimpleString("_hornetq.forced.delivery.seq");
+      }
+      else
+      {
+         this.forcedDeliveryMessageHeader = ClientConsumerImpl.FORCED_DELIVERY_MESSAGE;
+      }
 
       this.storageManager = storageManager;
 
@@ -1884,4 +1899,11 @@ public class ServerSessionImpl implements ServerSession, FailureListener
          return new TransactionImpl(xid, storageManager, timeoutSeconds);
       }
    }
+
+   @Override
+   public SimpleString getForcedDeliveryMessageHeader()
+   {
+      return this.forcedDeliveryMessageHeader;
+   }
+
 }

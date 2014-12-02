@@ -17,10 +17,12 @@
 package org.apache.activemq.spi.core.remoting;
 
 import io.netty.channel.ChannelFutureListener;
+
 import org.apache.activemq.api.core.ActiveMQBuffer;
 import org.apache.activemq.api.core.TransportConfiguration;
 import org.apache.activemq.core.security.ActiveMQPrincipal;
 import org.apache.activemq.spi.core.protocol.RemotingConnection;
+import org.apache.activemq.utils.ClientType;
 
 /**
  * The connection used by a channel to write data to.
@@ -118,4 +120,7 @@ public interface Connection
     * @return
     */
    boolean isUsingProtocolHandling();
+
+   void setClientType(ClientType type);
+   ClientType getClientType();
 }

@@ -39,6 +39,7 @@ import org.apache.activemq.core.server.impl.ServerMessageImpl;
 import org.apache.activemq.spi.core.protocol.RemotingConnection;
 import org.apache.activemq.spi.core.remoting.Acceptor;
 import org.apache.activemq.spi.core.remoting.Connection;
+import org.apache.activemq.utils.ClientType;
 import org.apache.activemq.utils.ConfigurationHelper;
 import org.apache.activemq.utils.VersionLoader;
 
@@ -822,6 +823,12 @@ public final class StompConnection implements RemotingConnection
    public int getMinLargeMessageSize()
    {
       return minLargeMessageSize;
+   }
+
+   @Override
+   public ClientType getClientType()
+   {
+      return transportConnection.getClientType();
    }
 
 }

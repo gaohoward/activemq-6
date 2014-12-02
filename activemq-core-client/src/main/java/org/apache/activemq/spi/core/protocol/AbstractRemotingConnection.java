@@ -29,6 +29,7 @@ import org.apache.activemq.core.client.ActiveMQClientMessageBundle;
 import org.apache.activemq.core.remoting.CloseListener;
 import org.apache.activemq.core.remoting.FailureListener;
 import org.apache.activemq.spi.core.remoting.Connection;
+import org.apache.activemq.utils.ClientType;
 
 /**
  * @author Clebert Suconic
@@ -217,6 +218,11 @@ public abstract class AbstractRemotingConnection implements RemotingConnection
    public void bufferReceived(final Object connectionID, final ActiveMQBuffer buffer)
    {
       dataReceived = true;
+   }
+
+   public ClientType getClientType()
+   {
+      return transportConnection.getClientType();
    }
 
 }

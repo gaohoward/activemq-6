@@ -34,7 +34,6 @@ import org.apache.activemq.api.core.ActiveMQIllegalStateException;
 import org.apache.activemq.api.core.SimpleString;
 import org.apache.activemq.api.core.management.CoreNotificationType;
 import org.apache.activemq.api.core.management.ManagementHelper;
-import org.apache.activemq.core.client.impl.ClientConsumerImpl;
 import org.apache.activemq.core.filter.Filter;
 import org.apache.activemq.core.message.BodyEncoder;
 import org.apache.activemq.core.persistence.StorageManager;
@@ -546,7 +545,7 @@ public class ServerConsumerImpl implements ServerConsumer, ReadyListener
                   {
                      ServerMessage forcedDeliveryMessage = new ServerMessageImpl(storageManager.generateID(), 50);
 
-                     forcedDeliveryMessage.putLongProperty(ClientConsumerImpl.FORCED_DELIVERY_MESSAGE, sequence);
+                     forcedDeliveryMessage.putLongProperty(session.getForcedDeliveryMessageHeader(), sequence);
                      forcedDeliveryMessage.setAddress(messageQueue.getName());
 
                      callback.sendMessage(forcedDeliveryMessage, ServerConsumerImpl.this, 0);
