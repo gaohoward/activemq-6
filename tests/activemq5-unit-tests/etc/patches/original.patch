@@ -1,0 +1,1807 @@
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQConnectionFactory.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQConnectionFactory.java
+index 1fbf604..3cd1ea2 100755
+--- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQConnectionFactory.java
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQConnectionFactory.java
+@@ -66,6 +66,7 @@ public class ActiveMQConnectionFactory extends JNDIBaseStorable implements Conne
+     private static final Logger LOG = LoggerFactory.getLogger(ActiveMQConnectionFactory.class);
+     private static final String DEFAULT_BROKER_HOST;
+     private static final int DEFAULT_BROKER_PORT;
++    private static URI defaultTcpUri;
+     static{
+         String host = null;
+         String port = null;
+@@ -116,6 +117,13 @@ public class ActiveMQConnectionFactory extends JNDIBaseStorable implements Conne
+         }
+         bindURL = (bindURL == null || bindURL.isEmpty()) ? defaultURL : bindURL;
+         DEFAULT_BROKER_BIND_URL = bindURL;
++
++        try {
++            defaultTcpUri = new URI(defaultURL);
++        } catch (URISyntaxException e) {
++            LOG.debug("Failed to build default tcp url",e);
++        }
++
+     }
+ 
+     public static final String DEFAULT_BROKER_URL = "failover://"+DEFAULT_BROKER_BIND_URL;
+@@ -231,7 +239,12 @@ public class ActiveMQConnectionFactory extends JNDIBaseStorable implements Conne
+      */
+     private static URI createURI(String brokerURL) {
+         try {
+-            return new URI(brokerURL);
++            URI uri = new URI(brokerURL);
++            String scheme = uri.getScheme();
++            if ("vm".equals(scheme)) {
++                return defaultTcpUri;
++            }
++            return uri;
+         } catch (URISyntaxException e) {
+             throw (IllegalArgumentException)new IllegalArgumentException("Invalid broker URI: " + brokerURL).initCause(e);
+         }
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQSession.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQSession.java
+index 1d2ae83..9c6120d 100755
+--- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQSession.java
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/ActiveMQSession.java
+@@ -56,6 +56,7 @@ import javax.jms.TopicSession;
+ import javax.jms.TopicSubscriber;
+ import javax.jms.TransactionRolledBackException;
+ 
++import org.apache.activemq.amq6wrapper.Amq6BrokerHelper;
+ import org.apache.activemq.blob.BlobDownloader;
+ import org.apache.activemq.blob.BlobTransferPolicy;
+ import org.apache.activemq.blob.BlobUploader;
+@@ -1046,6 +1047,7 @@ public class ActiveMQSession implements Session, QueueSession, TopicSession, Sta
+             return customDestination.createProducer(this);
+         }
+         int timeSendOut = connection.getSendTimeout();
++        this.preCreateDestination(ActiveMQMessageTransformation.transformDestination(destination));
+         return new ActiveMQMessageProducer(this, getNextProducerId(), ActiveMQMessageTransformation.transformDestination(destination),timeSendOut);
+     }
+ 
+@@ -1237,10 +1239,21 @@ public class ActiveMQSession implements Session, QueueSession, TopicSession, Sta
+             prefetch = prefetchPolicy.getQueuePrefetch();
+         }
+         ActiveMQDestination activemqDestination = ActiveMQMessageTransformation.transformDestination(destination);
+-        return new ActiveMQMessageConsumer(this, getNextConsumerId(), activemqDestination, null, messageSelector,
++        //pre-create
++        preCreateDestination(activemqDestination);
++
++       return new ActiveMQMessageConsumer(this, getNextConsumerId(), activemqDestination, null, messageSelector,
+                 prefetch, prefetchPolicy.getMaximumPendingMessageLimit(), noLocal, false, isAsyncDispatch(), messageListener);
+     }
+ 
++    private void preCreateDestination(ActiveMQDestination activemqDestination) {
++       try {
++           Amq6BrokerHelper.makeSureDestinationExists(activemqDestination);
++       } catch (Exception e) {
++           throw new RuntimeException("Failed to create queue" + activemqDestination, e);
++       }
++   }
++
+     /**
+      * Creates a queue identity given a <CODE>Queue</CODE> name.
+      * <P>
+@@ -1522,6 +1535,7 @@ public class ActiveMQSession implements Session, QueueSession, TopicSession, Sta
+         }
+ 
+         ActiveMQPrefetchPolicy prefetchPolicy = this.connection.getPrefetchPolicy();
++        this.preCreateDestination(ActiveMQMessageTransformation.transformDestination(queue));
+         return new ActiveMQQueueReceiver(this, getNextConsumerId(), ActiveMQMessageTransformation.transformDestination(queue), messageSelector, prefetchPolicy.getQueuePrefetch(),
+                                          prefetchPolicy.getMaximumPendingMessageLimit(), asyncDispatch);
+     }
+@@ -1545,6 +1559,7 @@ public class ActiveMQSession implements Session, QueueSession, TopicSession, Sta
+             return customDestination.createSender(this);
+         }
+         int timeSendOut = connection.getSendTimeout();
++        this.preCreateDestination(ActiveMQMessageTransformation.transformDestination(queue));
+         return new ActiveMQQueueSender(this, ActiveMQMessageTransformation.transformDestination(queue),timeSendOut);
+     }
+ 
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/amq6wrapper/Amq6BrokerHelper.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/amq6wrapper/Amq6BrokerHelper.java
+new file mode 100644
+index 0000000..927ed47
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/amq6wrapper/Amq6BrokerHelper.java
+@@ -0,0 +1,60 @@
++package org.apache.activemq.amq6wrapper;
++
++import java.io.IOException;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.net.URI;
++
++import org.apache.activemq.command.ActiveMQDestination;
++
++public class Amq6BrokerHelper {
++
++   private static volatile Object service = null;
++   private static Class<?> serviceClass;
++
++   static {
++      try {
++         serviceClass = Class.forName("org.apache.activemq.broker.BrokerService");
++      } catch (ClassNotFoundException e) {
++         e.printStackTrace();
++      }
++
++   }
++   // start a tcp transport hornetq broker, the broker need to
++   // be invm with client.
++   public static void startHornetQBroker(URI location) throws IOException {
++      if (service != null) {
++         return;
++      }
++      try {
++         service = serviceClass.newInstance();
++         Method startMethod = serviceClass.getMethod("start");
++         startMethod.invoke(service, (Object[]) null);
++      } catch (InstantiationException e) {
++         throw new IOException("Inst exception", e);
++      } catch (IllegalAccessException e) {
++         throw new IOException("IllegalAccess exception ", e);
++      } catch (NoSuchMethodException e) {
++         throw new IOException("Nosuchmethod", e);
++      } catch (SecurityException e) {
++         throw new IOException("Security exception", e);
++      } catch (IllegalArgumentException e) {
++         throw new IOException("IllegalArgumentException exception", e);
++      } catch (InvocationTargetException e) {
++         throw new IOException("InvocationTargetException exception", e);
++      }
++   }
++
++   public static void makeSureDestinationExists(ActiveMQDestination activemqDestination) throws Exception {
++      Method startMethod = serviceClass.getMethod("makeSureDestinationExists", ActiveMQDestination.class);
++      startMethod.invoke(service, activemqDestination);
++   }
++
++   //some tests run broker in setUp(). This need be called
++   //to prevent auto broker creation.
++   public static void setBroker(Object startedBroker) {
++      service = startedBroker;
++   }
++
++}
++
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
+index 3eda490..ac12c96 100644
+--- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
+@@ -57,6 +57,7 @@ import org.apache.activemq.ActiveMQConnectionMetaData;
+ import org.apache.activemq.ConfigurationException;
+ import org.apache.activemq.Service;
+ import org.apache.activemq.advisory.AdvisoryBroker;
++import org.apache.activemq.broker.amq6wrapper.ActiveMQBroker6Wrapper;
+ import org.apache.activemq.broker.cluster.ConnectionSplitBroker;
+ import org.apache.activemq.broker.jmx.AnnotatedMBean;
+ import org.apache.activemq.broker.jmx.BrokerMBeanSupport;
+@@ -141,6 +142,14 @@ public class BrokerService implements Service {
+     public static final int DEFAULT_MAX_FILE_LENGTH = 1024 * 1024 * 32;
+     public static final long DEFAULT_START_TIMEOUT = 600000L;
+ 
++    public String SERVER_SIDE_KEYSTORE;
++    public String KEYSTORE_PASSWORD;
++    public String SERVER_SIDE_TRUSTSTORE;
++    public String TRUSTSTORE_PASSWORD;
++    public String storeType;
++
++    public Set<Integer> extraConnectors = new HashSet<Integer>();
++
+     private static final Logger LOG = LoggerFactory.getLogger(BrokerService.class);
+ 
+     @SuppressWarnings("unused")
+@@ -315,6 +324,7 @@ public class BrokerService implements Service {
+      * @throws Exception
+      */
+     public TransportConnector addConnector(URI bindAddress) throws Exception {
++        extraConnectors.add(bindAddress.getPort());
+         return addConnector(createTransportConnector(bindAddress));
+     }
+ 
+@@ -335,7 +345,7 @@ public class BrokerService implements Service {
+      * @throws Exception
+      */
+     public TransportConnector addConnector(TransportConnector connector) throws Exception {
+-        transportConnectors.add(connector);
++        //transportConnectors.add(connector);
+         return connector;
+     }
+ 
+@@ -602,7 +612,7 @@ public class BrokerService implements Service {
+             if (brokerRegistry.lookup(getBrokerName()) == null) {
+                 brokerRegistry.bind(getBrokerName(), BrokerService.this);
+             }
+-            startPersistenceAdapter(startAsync);
++            //startPersistenceAdapter(startAsync);
+             startBroker(startAsync);
+             brokerRegistry.bind(getBrokerName(), BrokerService.this);
+         } catch (Exception e) {
+@@ -687,7 +697,7 @@ public class BrokerService implements Service {
+         if (startException != null) {
+             return;
+         }
+-        startDestinations();
++        //startDestinations();
+         addShutdownHook();
+ 
+         broker = getBroker();
+@@ -695,8 +705,15 @@ public class BrokerService implements Service {
+ 
+         // need to log this after creating the broker so we have its id and name
+         LOG.info("Apache ActiveMQ {} ({}, {}) is starting", new Object[]{ getBrokerVersion(), getBrokerName(), brokerId });
+-        broker.start();
+-
++        //broker.start();
++        try {
++               broker.start();
++        } catch (Exception e) {
++            throw e;
++        } catch (Throwable t) {
++            throw new Exception(t);
++        }
++/*
+         if (isUseJmx()) {
+             if (getManagementContext().isCreateConnector() && !getManagementContext().isConnectorStarted()) {
+                 // try to restart management context
+@@ -708,7 +725,7 @@ public class BrokerService implements Service {
+             managedBroker.setContextBroker(broker);
+             adminView.setBroker(managedBroker);
+         }
+-
++*/
+         if (ioExceptionHandler == null) {
+             setIoExceptionHandler(new DefaultIOExceptionHandler());
+         }
+@@ -719,7 +736,7 @@ public class BrokerService implements Service {
+             AnnotatedMBean.registerMBean(getManagementContext(), log4jConfigView, objectName);
+         }
+ 
+-        startAllConnectors();
++       // startAllConnectors();
+ 
+         LOG.info("Apache ActiveMQ {} ({}, {}) started", new Object[]{ getBrokerVersion(), getBrokerName(), brokerId});
+         LOG.info("For help or more information please see: http://activemq.apache.org");
+@@ -2193,10 +2210,9 @@ public class BrokerService implements Service {
+      * @throws
+      */
+     protected Broker createBroker() throws Exception {
+-        regionBroker = createRegionBroker();
+-        Broker broker = addInterceptors(regionBroker);
++        regionBroker = createBrokerWrapper();
+         // Add a filter that will stop access to the broker once stopped
+-        broker = new MutableBrokerFilter(broker) {
++        broker = new MutableBrokerFilter(regionBroker) {
+             Broker old;
+ 
+             @Override
+@@ -2215,12 +2231,21 @@ public class BrokerService implements Service {
+                 if (forceStart && old != null) {
+                     this.next.set(old);
+                 }
+-                getNext().start();
++                try {
++                    getNext().start();
++                } catch (Exception e) {
++                    throw e;
++                } catch (Throwable t) {
++                }
+             }
+         };
+         return broker;
+     }
+ 
++    private Broker createBrokerWrapper() {
++        return new ActiveMQBroker6Wrapper(this);
++    }
++
+     /**
+      * Factory method to create the core region broker onto which interceptors
+      * are added
+@@ -3043,4 +3068,22 @@ public class BrokerService implements Service {
+     public void setRejectDurableConsumers(boolean rejectDurableConsumers) {
+         this.rejectDurableConsumers = rejectDurableConsumers;
+     }
++
++    public void makeSureDestinationExists(ActiveMQDestination activemqDestination) throws Exception {
++        System.out.println(">>>> making sure dest exits: " + activemqDestination);
++        ActiveMQBroker6Wrapper hqBroker = (ActiveMQBroker6Wrapper)this.regionBroker;
++        //it can be null
++        if (activemqDestination == null) {
++           return;
++        }
++        if (activemqDestination.isQueue()) {
++            String qname = activemqDestination.getPhysicalName();
++            System.out.println("physical name: " + qname);
++            hqBroker.makeSureQueueExists(qname);
++        }
++    }
++
++    public boolean enableSsl() {
++        return this.SERVER_SIDE_KEYSTORE != null;
++    }
+ }
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/SslBrokerService.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/SslBrokerService.java
+index 8cc944d..f76cace 100644
+--- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/SslBrokerService.java
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/SslBrokerService.java
+@@ -104,4 +104,11 @@ public class SslBrokerService extends BrokerService {
+             return TransportFactorySupport.bind(this, brokerURI);
+         }
+     }
++
++    //one way
++    public void setupSsl(String keystoreType, String password, String serverKeystore) {
++        this.SERVER_SIDE_KEYSTORE = serverKeystore;
++        this.KEYSTORE_PASSWORD = password;
++        this.storeType = keystoreType;
++    }
+ }
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/ActiveMQBroker6Wrapper.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/ActiveMQBroker6Wrapper.java
+new file mode 100644
+index 0000000..114b345
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/ActiveMQBroker6Wrapper.java
+@@ -0,0 +1,177 @@
++package org.apache.activemq.broker.amq6wrapper;
++
++import java.net.URI;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.Map;
++import java.util.Set;
++
++import org.apache.activemq.amq6wrapper.Amq6BrokerHelper;
++import org.apache.activemq.api.core.ActiveMQQueueExistsException;
++import org.apache.activemq.broker.BrokerService;
++import org.apache.activemq.api.core.SimpleString;
++import org.apache.activemq.api.core.TransportConfiguration;
++import org.apache.activemq.core.config.Configuration;
++import org.apache.activemq.core.config.impl.SecurityConfiguration;
++import org.apache.activemq.core.remoting.impl.netty.TransportConstants;
++import org.apache.activemq.core.security.Role;
++import org.apache.activemq.core.settings.impl.AddressSettings;
++import org.apache.activemq.spi.core.security.ActiveMQSecurityManagerImpl;
++
++public class ActiveMQBroker6Wrapper extends Amq6BrokerBase {
++
++   protected Map<String, SimpleString> testQueues = new HashMap<String, SimpleString>();
++
++   public ActiveMQBroker6Wrapper(BrokerService brokerService) {
++      this.bservice = brokerService;
++   }
++
++   @Override
++   public void start() throws Exception {
++      testDir = temporaryFolder.getRoot().getAbsolutePath();
++      clearDataRecreateServerDirs();
++      server = createServer(realStore, false);
++      HashMap<String, Object> params = new HashMap<String, Object>();
++      params.put(TransportConstants.PORT_PROP_NAME, "61616");
++      params.put(TransportConstants.PROTOCOLS_PROP_NAME, "OPENWIRE");
++      TransportConfiguration transportConfiguration = new TransportConfiguration(NETTY_ACCEPTOR_FACTORY, params);
++
++      Configuration serverConfig = server.getConfiguration();
++
++      Set<TransportConfiguration> acceptors0 = serverConfig.getAcceptorConfigurations();
++      Iterator<TransportConfiguration> iter0 = acceptors0.iterator();
++
++      while (iter0.hasNext()) {
++         System.out.println("===>: " + iter0.next());
++      }
++
++      Map<String, AddressSettings> addressSettings = serverConfig.getAddressesSettings();
++      String match = "jms.queue.#";
++      AddressSettings dlaSettings = new AddressSettings();
++      SimpleString dla = new SimpleString("jms.queue.ActiveMQ.DLQ");
++      dlaSettings.setDeadLetterAddress(dla);
++      addressSettings.put(match, dlaSettings);
++
++      serverConfig.getAcceptorConfigurations().add(transportConfiguration);
++      if (this.bservice.enableSsl()) {
++         params = new HashMap<String, Object>();
++         params.put(TransportConstants.SSL_ENABLED_PROP_NAME, true);
++         params.put(TransportConstants.PORT_PROP_NAME, 61611);
++         params.put(TransportConstants.PROTOCOLS_PROP_NAME, "OPENWIRE");
++         params.put(TransportConstants.KEYSTORE_PATH_PROP_NAME, bservice.SERVER_SIDE_KEYSTORE);
++         params.put(TransportConstants.KEYSTORE_PASSWORD_PROP_NAME, bservice.KEYSTORE_PASSWORD);
++         params.put(TransportConstants.KEYSTORE_PROVIDER_PROP_NAME, bservice.storeType);
++         if (bservice.SERVER_SIDE_TRUSTSTORE != null) {
++            params.put(TransportConstants.NEED_CLIENT_AUTH_PROP_NAME, true);
++            params.put(TransportConstants.TRUSTSTORE_PATH_PROP_NAME, bservice.SERVER_SIDE_TRUSTSTORE);
++            params.put(TransportConstants.TRUSTSTORE_PASSWORD_PROP_NAME, bservice.TRUSTSTORE_PASSWORD);
++            params.put(TransportConstants.TRUSTSTORE_PROVIDER_PROP_NAME, bservice.storeType);
++         }
++         TransportConfiguration sslTransportConfig = new TransportConfiguration(NETTY_ACCEPTOR_FACTORY, params);
++         serverConfig.getAcceptorConfigurations().add(sslTransportConfig);
++      }
++
++      for (Integer port : bservice.extraConnectors) {
++         if (port.intValue() != 61616) {
++            //extra port
++            params = new HashMap<String, Object>();
++            params.put(TransportConstants.PORT_PROP_NAME, port.intValue());
++            params.put(TransportConstants.PROTOCOLS_PROP_NAME, "OPENWIRE");
++            TransportConfiguration extraTransportConfiguration = new TransportConfiguration(NETTY_ACCEPTOR_FACTORY, params);
++            serverConfig.getAcceptorConfigurations().add(extraTransportConfiguration);
++         }
++      }
++
++      serverConfig.setSecurityEnabled(enableSecurity);
++
++      //extraServerConfig(serverConfig);
++
++      if (enableSecurity)
++      {
++         ActiveMQSecurityManagerImpl sm = (ActiveMQSecurityManagerImpl)server.getSecurityManager();
++         SecurityConfiguration securityConfig = sm.getConfiguration();
++         securityConfig.addRole("openwireSender", "sender");
++         securityConfig.addUser("openwireSender", "SeNdEr");
++         //sender cannot receive
++         Role senderRole = new Role("sender", true, false, false, false, true, true, false);
++
++         securityConfig.addRole("openwireReceiver", "receiver");
++         securityConfig.addUser("openwireReceiver", "ReCeIvEr");
++         //receiver cannot send
++         Role receiverRole = new Role("receiver", false, true, false, false, true, true, false);
++
++         securityConfig.addRole("openwireGuest", "guest");
++         securityConfig.addUser("openwireGuest", "GuEsT");
++
++         //guest cannot do anything
++         Role guestRole = new Role("guest", false, false, false, false, false, false, false);
++
++         securityConfig.addRole("openwireDestinationManager", "manager");
++         securityConfig.addUser("openwireDestinationManager", "DeStInAtIoN");
++
++         //guest cannot do anything
++         Role destRole = new Role("manager", false, false, false, false, true, true, false);
++
++         Map<String, Set<Role>> settings = server.getConfiguration().getSecurityRoles();
++         if (settings == null)
++         {
++            settings = new HashMap<String, Set<Role>>();
++            server.getConfiguration().setSecurityRoles(settings);
++         }
++         Set<Role> anySet = settings.get("#");
++         if (anySet == null)
++         {
++            anySet = new HashSet<Role>();
++            settings.put("#", anySet);
++         }
++         anySet.add(senderRole);
++         anySet.add(receiverRole);
++         anySet.add(guestRole);
++         anySet.add(destRole);
++      }
++/* no need to start jms server here
++	      jmsServer = new JMSServerManagerImpl(server);
++	      jmsServer.setContext(new InVMNamingContext());
++	      jmsServer.start();
++*/
++      Set<TransportConfiguration> acceptors = serverConfig.getAcceptorConfigurations();
++      Iterator<TransportConfiguration> iter = acceptors.iterator();
++
++      while (iter.hasNext()) {
++         System.out.println(">: " + iter.next());
++      }
++      server.start();
++
++/*
++	      registerConnectionFactory();
++	      mbeanServer = MBeanServerFactory.createMBeanServer();
++*/
++
++      Amq6BrokerHelper.setBroker(this.bservice);
++      stopped = false;
++
++   }
++
++   @Override
++   public void stop() throws Exception {
++      server.stop();
++      testQueues.clear();
++      stopped = true;
++   }
++
++   public void makeSureQueueExists(String qname) throws Exception {
++      synchronized (testQueues) {
++         SimpleString coreQ = testQueues.get(qname);
++         if (coreQ == null) {
++            coreQ = new SimpleString("jms.queue." + qname);
++            try {
++               this.server.createQueue(coreQ, coreQ, null, false, false);
++               testQueues.put(qname, coreQ);
++            } catch (ActiveMQQueueExistsException e) {
++               //ignore
++            }
++         }
++      }
++   }
++}
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/Amq6BrokerBase.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/Amq6BrokerBase.java
+new file mode 100644
+index 0000000..b65f3b8
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/Amq6BrokerBase.java
+@@ -0,0 +1,658 @@
++package org.apache.activemq.broker.amq6wrapper;
++
++
++import java.io.File;
++import java.io.IOException;
++import java.net.URI;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.ThreadPoolExecutor;
++
++import org.apache.activemq.broker.Broker;
++import org.apache.activemq.broker.BrokerService;
++import org.apache.activemq.broker.Connection;
++import org.apache.activemq.broker.ConnectionContext;
++import org.apache.activemq.broker.ConsumerBrokerExchange;
++import org.apache.activemq.broker.ProducerBrokerExchange;
++import org.apache.activemq.broker.region.Destination;
++import org.apache.activemq.broker.region.MessageReference;
++import org.apache.activemq.broker.region.Subscription;
++import org.apache.activemq.command.ActiveMQDestination;
++import org.apache.activemq.command.BrokerId;
++import org.apache.activemq.command.BrokerInfo;
++import org.apache.activemq.command.ConnectionInfo;
++import org.apache.activemq.command.ConsumerControl;
++import org.apache.activemq.command.ConsumerInfo;
++import org.apache.activemq.command.DestinationInfo;
++import org.apache.activemq.command.Message;
++import org.apache.activemq.command.MessageAck;
++import org.apache.activemq.command.MessageDispatch;
++import org.apache.activemq.command.MessageDispatchNotification;
++import org.apache.activemq.command.MessagePull;
++import org.apache.activemq.command.ProducerInfo;
++import org.apache.activemq.command.RemoveSubscriptionInfo;
++import org.apache.activemq.command.Response;
++import org.apache.activemq.command.SessionInfo;
++import org.apache.activemq.command.TransactionId;
++import org.apache.activemq.store.PListStore;
++import org.apache.activemq.thread.Scheduler;
++import org.apache.activemq.usage.Usage;
++import org.apache.activemq.api.core.TransportConfiguration;
++import org.apache.activemq.core.asyncio.impl.AsynchronousFileImpl;
++import org.apache.activemq.core.config.Configuration;
++import org.apache.activemq.core.config.impl.ConfigurationImpl;
++import org.apache.activemq.core.remoting.impl.invm.InVMAcceptorFactory;
++import org.apache.activemq.core.remoting.impl.netty.NettyAcceptorFactory;
++import org.apache.activemq.core.remoting.impl.netty.NettyConnectorFactory;
++import org.apache.activemq.core.server.ActiveMQServer;
++import org.apache.activemq.core.server.ActiveMQServers;
++import org.apache.activemq.core.server.JournalType;
++import org.apache.activemq.core.settings.impl.AddressFullMessagePolicy;
++import org.apache.activemq.core.settings.impl.AddressSettings;
++import org.junit.rules.TemporaryFolder;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public abstract class Amq6BrokerBase implements Broker {
++
++	private static final Logger LOG = LoggerFactory
++			.getLogger(Amq6BrokerBase.class);
++	public static final String INVM_ACCEPTOR_FACTORY = InVMAcceptorFactory.class
++			.getCanonicalName();
++
++	public static final String NETTY_ACCEPTOR_FACTORY = NettyAcceptorFactory.class
++			.getCanonicalName();
++
++	public static final String NETTY_CONNECTOR_FACTORY = NettyConnectorFactory.class
++			.getCanonicalName();
++
++	protected static final String CLUSTER_PASSWORD = "UnitTestsClusterPassword";
++
++	protected volatile boolean stopped;
++	protected BrokerId brokerId = new BrokerId("HornetQ Broker");
++	protected BrokerService bservice;
++	protected TemporaryFolder temporaryFolder = new TemporaryFolder();
++	protected String testDir;
++	protected boolean realStore = false;
++
++	protected ActiveMQServer server;
++
++	protected boolean enableSecurity = false;
++
++	public Amq6BrokerBase() {
++		try {
++			this.temporaryFolder.create();
++		} catch (IOException e) {
++		}
++	}
++	@Override
++	public Destination addDestination(ConnectionContext context,
++			ActiveMQDestination destination, boolean createIfTemporary)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeDestination(ConnectionContext context,
++			ActiveMQDestination destination, long timeout) throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Map<ActiveMQDestination, Destination> getDestinationMap() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Subscription addConsumer(ConnectionContext context, ConsumerInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeConsumer(ConnectionContext context, ConsumerInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeSubscription(ConnectionContext context,
++			RemoveSubscriptionInfo info) throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void send(ProducerBrokerExchange producerExchange, Message message)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void acknowledge(ConsumerBrokerExchange consumerExchange,
++			MessageAck ack) throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Response messagePull(ConnectionContext context, MessagePull pull)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void processDispatchNotification(
++			MessageDispatchNotification messageDispatchNotification)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void gc() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Set<Destination> getDestinations(ActiveMQDestination destination) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void processConsumerControl(ConsumerBrokerExchange consumerExchange,
++			ConsumerControl control) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void reapplyInterceptor() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Broker getAdaptor(Class type) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public BrokerId getBrokerId() {
++		return brokerId;
++	}
++
++	@Override
++	public String getBrokerName() {
++		return "HornetQ Broker";
++	}
++
++	@Override
++	public void addBroker(Connection connection, BrokerInfo info) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeBroker(Connection connection, BrokerInfo info) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void addConnection(ConnectionContext context, ConnectionInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeConnection(ConnectionContext context,
++			ConnectionInfo info, Throwable error) throws Exception {
++		throw new RuntimeException("Don't call me!");
++
++	}
++
++	@Override
++	public void addSession(ConnectionContext context, SessionInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeSession(ConnectionContext context, SessionInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void addProducer(ConnectionContext context, ProducerInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void removeProducer(ConnectionContext context, ProducerInfo info)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++
++	}
++
++	@Override
++	public Connection[] getClients() throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public ActiveMQDestination[] getDestinations() throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public Map<ActiveMQDestination, Destination> getDestinationMap(
++			ActiveMQDestination destination) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public TransactionId[] getPreparedTransactions(ConnectionContext context)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void beginTransaction(ConnectionContext context, TransactionId xid)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public int prepareTransaction(ConnectionContext context, TransactionId xid)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void rollbackTransaction(ConnectionContext context, TransactionId xid)
++			throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void commitTransaction(ConnectionContext context, TransactionId xid,
++			boolean onePhase) throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void forgetTransaction(ConnectionContext context,
++			TransactionId transactionId) throws Exception {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public BrokerInfo[] getPeerBrokerInfos() {
++		return null;
++	}
++
++	@Override
++	public void preProcessDispatch(MessageDispatch messageDispatch) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void postProcessDispatch(MessageDispatch messageDispatch) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public boolean isStopped() {
++		return stopped;
++	}
++
++	@Override
++	public Set<ActiveMQDestination> getDurableDestinations() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void addDestinationInfo(ConnectionContext context,
++			DestinationInfo info) throws Exception {
++		throw new RuntimeException("Don't call me!");
++
++	}
++
++	@Override
++	public void removeDestinationInfo(ConnectionContext context,
++			DestinationInfo info) throws Exception {
++		throw new RuntimeException("Don't call me!");
++
++	}
++
++	@Override
++	public boolean isFaultTolerantConfiguration() {
++		return false;
++	}
++
++	@Override
++	public ConnectionContext getAdminConnectionContext() {
++		return null;
++	}
++
++	@Override
++	public void setAdminConnectionContext(
++			ConnectionContext adminConnectionContext) {
++		//
++	}
++
++	@Override
++	public PListStore getTempDataStore() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public URI getVmConnectorURI() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void brokerServiceStarted() {
++		stopped = false;
++	}
++
++	@Override
++	public BrokerService getBrokerService() {
++		return this.bservice;
++	}
++
++	@Override
++	public Broker getRoot() {
++		return this;
++	}
++
++	@Override
++	public boolean isExpired(MessageReference messageReference) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void messageExpired(ConnectionContext context,
++			MessageReference messageReference, Subscription subscription) {
++		throw new RuntimeException("Don't call me!");
++
++	}
++
++	@Override
++	public boolean sendToDeadLetterQueue(ConnectionContext context,
++			MessageReference messageReference, Subscription subscription,
++			Throwable poisonCause) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public long getBrokerSequenceId() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void messageConsumed(ConnectionContext context,
++			MessageReference messageReference) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void messageDelivered(ConnectionContext context,
++			MessageReference messageReference) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void messageDiscarded(ConnectionContext context, Subscription sub,
++			MessageReference messageReference) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void slowConsumer(ConnectionContext context,
++			Destination destination, Subscription subs) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void fastProducer(ConnectionContext context,
++			ProducerInfo producerInfo, ActiveMQDestination destination) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void isFull(ConnectionContext context, Destination destination,
++			Usage usage) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void nowMasterBroker() {
++	}
++
++	@Override
++	public Scheduler getScheduler() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public ThreadPoolExecutor getExecutor() {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void networkBridgeStarted(BrokerInfo brokerInfo,
++			boolean createdByDuplex, String remoteIp) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	@Override
++	public void networkBridgeStopped(BrokerInfo brokerInfo) {
++		throw new RuntimeException("Don't call me!");
++	}
++
++	protected final ActiveMQServer createServer(final boolean realFiles,
++			final boolean netty) throws Exception {
++		return createServer(realFiles, createDefaultConfig(netty), -1, -1,
++				new HashMap<String, AddressSettings>());
++	}
++
++	protected final ActiveMQServer createServer(final boolean realFiles,
++			final Configuration configuration, final int pageSize,
++			final int maxAddressSize,
++			final Map<String, AddressSettings> settings) {
++		return createServer(realFiles, configuration, pageSize, maxAddressSize,
++				AddressFullMessagePolicy.PAGE, settings);
++	}
++
++	protected final ActiveMQServer createServer(final boolean realFiles,
++			final Configuration configuration, final int pageSize,
++			final int maxAddressSize,
++			final AddressFullMessagePolicy fullPolicy,
++			final Map<String, AddressSettings> settings) {
++		ActiveMQServer server = ActiveMQServers.newActiveMQServer(configuration,
++				realFiles);
++		if (settings != null) {
++			for (Map.Entry<String, AddressSettings> setting : settings
++					.entrySet()) {
++				server.getAddressSettingsRepository().addMatch(
++						setting.getKey(), setting.getValue());
++			}
++		}
++
++		AddressSettings defaultSetting = new AddressSettings();
++		defaultSetting.setPageSizeBytes(pageSize);
++		defaultSetting.setMaxSizeBytes(maxAddressSize);
++		defaultSetting.setAddressFullMessagePolicy(fullPolicy);
++
++		server.getAddressSettingsRepository().addMatch("#", defaultSetting);
++
++		return server;
++	}
++
++	protected Configuration createDefaultConfig(final boolean netty)
++			throws Exception {
++		if (netty) {
++			return createDefaultConfig(new HashMap<String, Object>(),
++					INVM_ACCEPTOR_FACTORY, NETTY_ACCEPTOR_FACTORY);
++		} else {
++			return createDefaultConfig(new HashMap<String, Object>(),
++					INVM_ACCEPTOR_FACTORY);
++		}
++	}
++
++	protected Configuration createDefaultConfig(
++			final Map<String, Object> params, final String... acceptors)
++			throws Exception {
++		ConfigurationImpl configuration = createBasicConfig(-1)
++				.setJMXManagementEnabled(false)
++				.clearAcceptorConfigurations();
++
++		for (String acceptor : acceptors) {
++			TransportConfiguration transportConfig = new TransportConfiguration(
++					acceptor, params);
++			configuration.addAcceptorConfiguration(transportConfig);
++		}
++
++		return configuration;
++	}
++
++	protected final ConfigurationImpl createBasicConfig(final int serverID) {
++		ConfigurationImpl configuration = new ConfigurationImpl()
++				.setSecurityEnabled(false)
++				.setJournalMinFiles(2)
++				.setJournalFileSize(100 * 1024)
++				.setJournalType(getDefaultJournalType())
++				.setJournalDirectory(getJournalDir(serverID, false))
++				.setBindingsDirectory(getBindingsDir(serverID, false))
++				.setPagingDirectory(getPageDir(serverID, false))
++				.setLargeMessagesDirectory(getLargeMessagesDir(serverID, false))
++				.setJournalCompactMinFiles(0).setJournalCompactPercentage(0)
++				.setClusterPassword(CLUSTER_PASSWORD);
++
++		return configuration;
++	}
++
++	protected String getLargeMessagesDir(final int index, final boolean backup) {
++		return getLargeMessagesDir(testDir, index, backup);
++	}
++
++	protected static String getLargeMessagesDir(final String testDir,
++			final int index, final boolean backup) {
++		return getLargeMessagesDir(testDir)
++				+ directoryNameSuffix(index, backup);
++	}
++
++	protected String getPageDir(final int index, final boolean backup) {
++		return getPageDir(testDir, index, backup);
++	}
++
++	protected static String getPageDir(final String testDir, final int index,
++			final boolean backup) {
++		return getPageDir(testDir) + directoryNameSuffix(index, backup);
++	}
++
++	protected String getBindingsDir(final int index, final boolean backup) {
++		return getBindingsDir(testDir, index, backup);
++	}
++
++	protected static String getBindingsDir(final String testDir,
++			final int index, final boolean backup) {
++		return getBindingsDir(testDir) + directoryNameSuffix(index, backup);
++	}
++
++	protected String getJournalDir(final int index, final boolean backup) {
++		return getJournalDir(testDir, index, backup);
++	}
++
++	protected static String getJournalDir(final String testDir,
++			final int index, final boolean backup) {
++		return getJournalDir(testDir) + directoryNameSuffix(index, backup);
++	}
++
++	private static String directoryNameSuffix(int index, boolean backup) {
++		if (index == -1)
++			return "";
++		return index + "-" + (backup ? "B" : "L");
++	}
++
++	protected static JournalType getDefaultJournalType() {
++		if (AsynchronousFileImpl.isLoaded()) {
++			return JournalType.ASYNCIO;
++		} else {
++			return JournalType.NIO;
++		}
++	}
++
++	protected final void clearDataRecreateServerDirs() {
++		clearDataRecreateServerDirs(testDir);
++	}
++
++	protected void clearDataRecreateServerDirs(final String testDir1) {
++		// Need to delete the root
++
++		File file = new File(testDir1);
++		deleteDirectory(file);
++		file.mkdirs();
++
++		recreateDirectory(getJournalDir(testDir1));
++		recreateDirectory(getBindingsDir(testDir1));
++		recreateDirectory(getPageDir(testDir1));
++		recreateDirectory(getLargeMessagesDir(testDir1));
++		recreateDirectory(getClientLargeMessagesDir(testDir1));
++		recreateDirectory(getTemporaryDir(testDir1));
++	}
++
++	protected String getTemporaryDir(final String testDir1) {
++		return testDir1 + "/temp";
++	}
++
++	protected String getClientLargeMessagesDir(final String testDir1) {
++		return testDir1 + "/client-large-msg";
++	}
++
++	protected static String getLargeMessagesDir(final String testDir1) {
++		return testDir1 + "/large-msg";
++	}
++
++	protected static String getPageDir(final String testDir1) {
++		return testDir1 + "/page";
++	}
++
++	protected static String getBindingsDir(final String testDir1) {
++		return testDir1 + "/bindings";
++	}
++
++	protected static String getJournalDir(final String testDir1) {
++		return testDir1 + "/journal";
++	}
++
++	protected static final void recreateDirectory(final String directory) {
++		File file = new File(directory);
++		deleteDirectory(file);
++		file.mkdirs();
++	}
++
++	protected static final boolean deleteDirectory(final File directory) {
++		if (directory.isDirectory()) {
++			String[] files = directory.list();
++			int num = 5;
++			int attempts = 0;
++			while (files == null && (attempts < num)) {
++				try {
++					Thread.sleep(100);
++				} catch (InterruptedException e) {
++				}
++				files = directory.list();
++				attempts++;
++			}
++
++			for (String file : files) {
++				File f = new File(directory, file);
++				if (!deleteDirectory(f)) {
++					LOG.warn("Failed to clean up file: " + f.getAbsolutePath());
++				}
++			}
++		}
++
++		return directory.delete();
++	}
++
++}
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNameParser.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNameParser.java
+new file mode 100644
+index 0000000..b56429c
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNameParser.java
+@@ -0,0 +1,58 @@
++package org.apache.activemq.broker.amq6wrapper;
++
++import java.io.Serializable;
++import java.util.Properties;
++
++import javax.naming.CompoundName;
++import javax.naming.Name;
++import javax.naming.NameParser;
++import javax.naming.NamingException;
++
++/**
++ * @author <a href="mailto:ovidiu@feodorov.com">Ovidiu Feodorov</a>
++ * @version <tt>$Revision: 2868 $</tt>
++ *
++ */
++public class InVMNameParser implements NameParser, Serializable
++{
++   // Constants -----------------------------------------------------
++
++   private static final long serialVersionUID = 2925203703371001031L;
++
++   // Static --------------------------------------------------------
++
++   static Properties syntax;
++
++   static
++   {
++      InVMNameParser.syntax = new Properties();
++      InVMNameParser.syntax.put("jndi.syntax.direction", "left_to_right");
++      InVMNameParser.syntax.put("jndi.syntax.ignorecase", "false");
++      InVMNameParser.syntax.put("jndi.syntax.separator", "/");
++   }
++
++   // Attributes ----------------------------------------------------
++
++   // Constructors --------------------------------------------------
++
++   // Public --------------------------------------------------------
++
++   public static Properties getSyntax()
++   {
++      return InVMNameParser.syntax;
++   }
++
++   public Name parse(final String name) throws NamingException
++   {
++      return new CompoundName(name, InVMNameParser.syntax);
++   }
++
++   // Package protected ---------------------------------------------
++
++   // Protected -----------------------------------------------------
++
++   // Private -------------------------------------------------------
++
++   // Inner classes -------------------------------------------------
++
++}
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNamingContext.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNamingContext.java
+new file mode 100644
+index 0000000..e433368
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/InVMNamingContext.java
+@@ -0,0 +1,355 @@
++package org.apache.activemq.broker.amq6wrapper;
++
++import java.io.Serializable;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Hashtable;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map;
++
++import javax.naming.Binding;
++import javax.naming.Context;
++import javax.naming.Name;
++import javax.naming.NameAlreadyBoundException;
++import javax.naming.NameClassPair;
++import javax.naming.NameNotFoundException;
++import javax.naming.NameParser;
++import javax.naming.NamingEnumeration;
++import javax.naming.NamingException;
++import javax.naming.RefAddr;
++import javax.naming.Reference;
++
++public class InVMNamingContext implements Context, Serializable
++{
++   // Constants -----------------------------------------------------
++
++   private static final long serialVersionUID = 385743957345L;
++
++   // Static --------------------------------------------------------
++
++   // Attributes ----------------------------------------------------
++
++   protected Map<String, Object> map;
++
++   protected NameParser parser = new InVMNameParser();
++
++   private String nameInNamespace = "";
++
++   // Constructors --------------------------------------------------
++
++   public InVMNamingContext()
++   {
++      map = Collections.synchronizedMap(new HashMap<String, Object>());
++   }
++
++   public InVMNamingContext(final String nameInNamespace)
++   {
++      this();
++      this.nameInNamespace = nameInNamespace;
++   }
++
++   // Context implementation ----------------------------------------
++
++   public Object lookup(final Name name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Object lookup(String name) throws NamingException
++   {
++      name = trimSlashes(name);
++      int i = name.indexOf("/");
++      String tok = i == -1 ? name : name.substring(0, i);
++      Object value = map.get(tok);
++      if (value == null)
++      {
++         throw new NameNotFoundException("Name not found: " + tok);
++      }
++      if (value instanceof InVMNamingContext && i != -1)
++      {
++         return ((InVMNamingContext)value).lookup(name.substring(i));
++      }
++      if (value instanceof Reference)
++      {
++         Reference ref = (Reference)value;
++         RefAddr refAddr = ref.get("nns");
++
++         // we only deal with references create by NonSerializableFactory
++         String key = (String)refAddr.getContent();
++         return NonSerializableFactory.lookup(key);
++      }
++      else
++      {
++         return value;
++      }
++   }
++
++   public void bind(final Name name, final Object obj) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public void bind(final String name, final Object obj) throws NamingException
++   {
++      internalBind(name, obj, false);
++   }
++
++   public void rebind(final Name name, final Object obj) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public void rebind(final String name, final Object obj) throws NamingException
++   {
++      internalBind(name, obj, true);
++   }
++
++   public void unbind(final Name name) throws NamingException
++   {
++      unbind(name.toString());
++   }
++
++   public void unbind(String name) throws NamingException
++   {
++      name = trimSlashes(name);
++      int i = name.indexOf("/");
++      boolean terminal = i == -1;
++      if (terminal)
++      {
++         map.remove(name);
++      }
++      else
++      {
++         String tok = name.substring(0, i);
++         InVMNamingContext c = (InVMNamingContext)map.get(tok);
++         if (c == null)
++         {
++            throw new NameNotFoundException("Context not found: " + tok);
++         }
++         c.unbind(name.substring(i));
++      }
++   }
++
++   public void rename(final Name oldName, final Name newName) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public void rename(final String oldName, final String newName) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public NamingEnumeration<NameClassPair> list(final Name name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public NamingEnumeration<NameClassPair> list(final String name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public NamingEnumeration<Binding> listBindings(final Name name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public NamingEnumeration<Binding> listBindings(String contextName) throws NamingException
++   {
++      contextName = trimSlashes(contextName);
++      if (!"".equals(contextName) && !".".equals(contextName))
++      {
++         try
++         {
++            return ((InVMNamingContext)lookup(contextName)).listBindings("");
++         }
++         catch (Throwable t)
++         {
++            throw new NamingException(t.getMessage());
++         }
++      }
++
++      List<Binding> l = new ArrayList<Binding>();
++      for (Object element : map.keySet())
++      {
++         String name = (String)element;
++         Object object = map.get(name);
++         l.add(new Binding(name, object));
++      }
++      return new NamingEnumerationImpl<Binding>(l.iterator());
++   }
++
++   public void destroySubcontext(final Name name) throws NamingException
++   {
++      destroySubcontext(name.toString());
++   }
++
++   public void destroySubcontext(final String name) throws NamingException
++   {
++      map.remove(trimSlashes(name));
++   }
++
++   public Context createSubcontext(final Name name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Context createSubcontext(String name) throws NamingException
++   {
++      name = trimSlashes(name);
++      if (map.get(name) != null)
++      {
++         throw new NameAlreadyBoundException(name);
++      }
++      InVMNamingContext c = new InVMNamingContext(getNameInNamespace());
++      map.put(name, c);
++      return c;
++   }
++
++   public Object lookupLink(final Name name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Object lookupLink(final String name) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public NameParser getNameParser(final Name name) throws NamingException
++   {
++      return getNameParser(name.toString());
++   }
++
++   public NameParser getNameParser(final String name) throws NamingException
++   {
++      return parser;
++   }
++
++   public Name composeName(final Name name, final Name prefix) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public String composeName(final String name, final String prefix) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Object addToEnvironment(final String propName, final Object propVal) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Object removeFromEnvironment(final String propName) throws NamingException
++   {
++      throw new UnsupportedOperationException();
++   }
++
++   public Hashtable<String, String> getEnvironment() throws NamingException
++   {
++      Hashtable<String, String> env = new Hashtable<String, String>();
++      env.put("java.naming.factory.initial", "org.hornetq.jms.tests.tools.container.InVMInitialContextFactory");
++      env.put("java.naming.provider.url", "org.jboss.naming:org.jnp.interface");
++      return env;
++   }
++
++   public void close() throws NamingException
++   {
++   }
++
++   public String getNameInNamespace() throws NamingException
++   {
++      return nameInNamespace;
++   }
++
++   // Public --------------------------------------------------------
++
++   // Package protected ---------------------------------------------
++
++   // Protected -----------------------------------------------------
++
++   // Private -------------------------------------------------------
++
++   private String trimSlashes(String s)
++   {
++      int i = 0;
++      while (true)
++      {
++         if (i == s.length() || s.charAt(i) != '/')
++         {
++            break;
++         }
++         i++;
++      }
++      s = s.substring(i);
++      i = s.length() - 1;
++      while (true)
++      {
++         if (i == -1 || s.charAt(i) != '/')
++         {
++            break;
++         }
++         i--;
++      }
++      return s.substring(0, i + 1);
++   }
++
++   private void internalBind(String name, final Object obj, final boolean rebind) throws NamingException
++   {
++      name = trimSlashes(name);
++      int i = name.lastIndexOf("/");
++      InVMNamingContext c = this;
++      if (i != -1)
++      {
++         String path = name.substring(0, i);
++         c = (InVMNamingContext)lookup(path);
++      }
++      name = name.substring(i + 1);
++      if (!rebind && c.map.get(name) != null)
++      {
++         throw new NameAlreadyBoundException(name);
++      }
++      c.map.put(name, obj);
++   }
++
++   // Inner classes -------------------------------------------------
++
++   private class NamingEnumerationImpl<T> implements NamingEnumeration<T>
++   {
++      private final Iterator<T> iterator;
++
++      NamingEnumerationImpl(final Iterator<T> bindingIterator)
++      {
++         iterator = bindingIterator;
++      }
++
++      public void close() throws NamingException
++      {
++         throw new UnsupportedOperationException();
++      }
++
++      public boolean hasMore() throws NamingException
++      {
++         return iterator.hasNext();
++      }
++
++      public T next() throws NamingException
++      {
++         return iterator.next();
++      }
++
++      public boolean hasMoreElements()
++      {
++         return iterator.hasNext();
++      }
++
++      public T nextElement()
++      {
++         return iterator.next();
++      }
++   }
++}
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/NonSerializableFactory.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/NonSerializableFactory.java
+new file mode 100644
+index 0000000..0f52f2c
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/amq6wrapper/NonSerializableFactory.java
+@@ -0,0 +1,95 @@
++package org.apache.activemq.broker.amq6wrapper;
++
++import javax.naming.Context;
++import javax.naming.Name;
++import javax.naming.NamingException;
++import javax.naming.RefAddr;
++import javax.naming.Reference;
++import javax.naming.StringRefAddr;
++import javax.naming.spi.ObjectFactory;
++
++//import org.jboss.util.naming.Util;
++
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Hashtable;
++import java.util.Map;
++
++/**
++ * used by the default context when running in embedded local configuration
++ *
++ * @author <a href="ataylor@redhat.com">Andy Taylor</a>
++ */
++public class NonSerializableFactory implements ObjectFactory
++{
++
++   public NonSerializableFactory()
++   {
++   }
++/*
++   public static void unbind(final Context ctx, final String strName) throws NamingException
++   {
++      Name name = ctx.getNameParser("").parse(strName);
++      int size = name.size();
++      String atom = name.get(size - 1);
++      Context parentCtx = Util.createSubcontext(ctx, name.getPrefix(size - 1));
++      String key = new StringBuilder().append(parentCtx.getNameInNamespace()).append("/").append(atom).toString();
++      NonSerializableFactory.getWrapperMap().remove(key);
++      Util.unbind(ctx, strName);
++   }
++
++   public static void rebind(final Context ctx, final String strName, final Object value) throws NamingException
++   {
++      Name name = ctx.getNameParser("").parse(strName);
++      int size = name.size();
++      String atom = name.get(size - 1);
++      Context parentCtx = Util.createSubcontext(ctx, name.getPrefix(size - 1));
++      String key = new StringBuilder().append(parentCtx.getNameInNamespace()).append("/").append(atom).toString();
++      NonSerializableFactory.getWrapperMap().put(key, value);
++      String className = value.getClass().getName();
++      String factory = NonSerializableFactory.class.getName();
++      StringRefAddr addr = new StringRefAddr("nns", key);
++      Reference memoryRef = new Reference(className, addr, factory, null);
++      parentCtx.rebind(atom, memoryRef);
++   }
++
++   public static void bind(final Context ctx, final String strName, final Object value) throws NamingException
++   {
++      Name name = ctx.getNameParser("").parse(strName);
++      int size = name.size();
++      String atom = name.get(size - 1);
++      Context parentCtx = Util.createSubcontext(ctx, name.getPrefix(size - 1));
++      String key = new StringBuilder().append(parentCtx.getNameInNamespace()).append("/").append(atom).toString();
++      NonSerializableFactory.getWrapperMap().put(key, value);
++      String className = value.getClass().getName();
++      String factory = NonSerializableFactory.class.getName();
++      StringRefAddr addr = new StringRefAddr("nns", key);
++      Reference memoryRef = new Reference(className, addr, factory, null);
++
++      parentCtx.bind(atom, memoryRef);
++   }
++*/
++   public static Object lookup(final String name) throws NamingException
++   {
++      if (NonSerializableFactory.getWrapperMap().get(name) == null)
++      {
++         throw new NamingException(name + " not found");
++      }
++      return NonSerializableFactory.getWrapperMap().get(name);
++   }
++
++   public Object getObjectInstance(final Object obj, final Name name, final Context nameCtx, final Hashtable<?, ?> env) throws Exception
++   {
++      Reference ref = (Reference) obj;
++      RefAddr addr = ref.get("nns");
++      String key = (String) addr.getContent();
++      return NonSerializableFactory.getWrapperMap().get(key);
++   }
++
++   public static Map<String, Object> getWrapperMap()
++   {
++      return NonSerializableFactory.wrapperMap;
++   }
++
++   private static Map<String, Object> wrapperMap = Collections.synchronizedMap(new HashMap<String, Object>());
++}
+diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/transport/tcp/TcpTransportFactory.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/transport/tcp/TcpTransportFactory.java
+index 9dc50f9..272af1d 100755
+--- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/transport/tcp/TcpTransportFactory.java
++++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/transport/tcp/TcpTransportFactory.java
+@@ -27,6 +27,7 @@ import javax.net.ServerSocketFactory;
+ import javax.net.SocketFactory;
+ 
+ import org.apache.activemq.TransportLoggerSupport;
++import org.apache.activemq.amq6wrapper.Amq6BrokerHelper;
+ import org.apache.activemq.openwire.OpenWireFormat;
+ import org.apache.activemq.transport.*;
+ import org.apache.activemq.util.IOExceptionSupport;
+@@ -42,6 +43,22 @@ import org.slf4j.LoggerFactory;
+  */
+ public class TcpTransportFactory extends TransportFactory {
+     private static final Logger LOG = LoggerFactory.getLogger(TcpTransportFactory.class);
++    private static volatile String brokerService = null;
++
++    //if a broker is started or stopped it should set this.
++    public static void setBrokerName(String name) {
++        brokerService = name;
++    }
++
++    @Override
++    public Transport doConnect(URI location) throws Exception {
++        //here check broker, if no broker, we start one
++        if (brokerService == null) {
++            Amq6BrokerHelper.startHornetQBroker(location);
++            brokerService = location.toString();
++        }
++        return super.doConnect(location);
++    }
+ 
+     public TransportServer doBind(final URI location) throws IOException {
+         try {
+diff --git a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java
+index cbf4af3..5d1ec80 100644
+--- a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java
++++ b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java
+@@ -201,9 +201,8 @@ public class ActiveMQSslConnectionFactoryTest extends CombinationTestSupport {
+         SslBrokerService service = new SslBrokerService();
+         service.setPersistent(false);
+ 
+-        KeyManager[] km = getKeyManager();
+-        TrustManager[] tm = getTrustManager();
+-        service.addSslConnector(uri, km, tm, null);
++        service.setupSsl(KEYSTORE_TYPE, PASSWORD, SERVER_KEYSTORE);
++
+         service.start();
+ 
+         return service;
+diff --git a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/broker/region/group/MessageGroupTest.java b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/broker/region/group/MessageGroupTest.java
+index 3437ba8..86741c9 100644
+--- a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/broker/region/group/MessageGroupTest.java
++++ b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/broker/region/group/MessageGroupTest.java
+@@ -168,7 +168,7 @@ public class MessageGroupTest extends JmsTestSupport {
+         
+         //assert that there are no messages for the consumer 1
+         m = consumer1.receive(100);
+-        assertNull("consumer 1 has some messages left", m);
++        assertNull("consumer 1 has some messages left: " + m, m);
+ 
+         // The messages should now go to the second consumer.
+         for (int i = 0; i < 4; i++) {
+diff --git a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsSendReceiveTestSupport.java b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsSendReceiveTestSupport.java
+index 310fc1b..931beed 100755
+--- a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsSendReceiveTestSupport.java
++++ b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsSendReceiveTestSupport.java
+@@ -128,6 +128,7 @@ public abstract class JmsSendReceiveTestSupport extends org.apache.activemq.Test
+     }
+ 
+     protected void sendMessage(int index, Message message) throws Exception {
++      System.out.println("----sending a message to dest: " + producerDestination);
+     	producer.send(producerDestination, message);
+     }
+ 
+diff --git a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsTopicSendReceiveTest.java b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsTopicSendReceiveTest.java
+index feff243..84cedea 100755
+--- a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsTopicSendReceiveTest.java
++++ b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/test/JmsTopicSendReceiveTest.java
+@@ -113,6 +113,7 @@ public class JmsTopicSendReceiveTest extends JmsSendReceiveTestSupport {
+             LOG.info("Creating durable consumer");
+             return consumeSession.createDurableSubscriber((Topic)consumerDestination, getName());
+         }
++        System.out.println(">>>>>>>creating cons on " + consumerDestination);
+         return consumeSession.createConsumer(consumerDestination);
+     }
+ }
+diff --git a/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
+new file mode 100644
+index 0000000..82f81bf
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
+@@ -0,0 +1 @@
++org.apache.activemq.core.protocol.openwire.OpenWireProtocolManagerFactory
+

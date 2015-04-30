@@ -74,6 +74,7 @@
       <skipPerformanceTests>true</skipPerformanceTests>
       <skipConcurrentTests>true</skipConcurrentTests>
       <skipRestTests>true</skipRestTests>
+      <skipActiveMQ5Tests>true</skipActiveMQ5Tests>
       <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
       <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
