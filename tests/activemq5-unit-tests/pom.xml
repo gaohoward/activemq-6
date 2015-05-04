@@ -368,7 +368,7 @@
                            <classifier>sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/main/java</outputDirectory>
-                           <overWrite>true</overWrite>
+<!--                           <overWrite>true</overWrite> -->
                         </artifactItem>
                         <artifactItem>
                            <groupId>org.apache.activemq</groupId>
@@ -378,7 +378,7 @@
                            <classifier>sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/main/java</outputDirectory>
-                           <overWrite>true</overWrite>
+<!--                           <overWrite>true</overWrite>  -->
                         </artifactItem>
                         <artifactItem>
                            <groupId>org.apache.activemq</groupId>
@@ -388,7 +388,7 @@
                            <classifier>test-sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/test/java</outputDirectory>
-                           <overWrite>true</overWrite>
+<!--                           <overWrite>true</overWrite>  -->
                         </artifactItem>
                      </artifactItems>
                   </configuration>
