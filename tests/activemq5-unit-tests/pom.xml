@@ -388,6 +388,26 @@
                      </artifactItems>
                   </configuration>
                </execution>
+               <execution>
+                  <id>unpack-resources</id>
+                  <phase>process-sources</phase>
+                  <goals>
+                     <goal>unpack</goal>
+                  </goals>
+                  <configuration>
+                     <artifactItems>
+                        <artifactItem>
+                           <groupId>org.apache.activemq</groupId>
+                           <artifactId>activemq-unit-tests</artifactId>
+                           <version>${activemq5.project.version}</version>
+                           <type>jar</type>
+                           <classifier>test-sources</classifier>
+                           <includes>*.xml, *.keystore, *.access, *.password, *.properties, *.config</includes>
+                           <outputDirectory>src/test/resources</outputDirectory>
+                        </artifactItem>
+                     </artifactItems>
+                  </configuration>
+               </execution>
             </executions>
          </plugin>
 
