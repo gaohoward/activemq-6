@@ -45,8 +45,6 @@
       <directory-version>2.0.0-M6</directory-version>
       <activeio-core-version>3.1.4</activeio-core-version>
       
-      <!-- control test switch, move to profile def later -->
-      <skipActiveMQ5Tests>false</skipActiveMQ5Tests>
    </properties>
 
    <dependencies>
@@ -359,7 +357,7 @@
                      <goal>unpack</goal>
                   </goals>
                   <configuration>
-					 <artifactItems>
+                     <artifactItems>
                         <artifactItem>
                            <groupId>org.apache.activemq</groupId>
                            <artifactId>activemq-broker</artifactId>
@@ -368,7 +366,6 @@
                            <classifier>sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/main/java</outputDirectory>
-<!--                           <overWrite>true</overWrite> -->
                         </artifactItem>
                         <artifactItem>
                            <groupId>org.apache.activemq</groupId>
@@ -378,7 +375,6 @@
                            <classifier>sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/main/java</outputDirectory>
-<!--                           <overWrite>true</overWrite>  -->
                         </artifactItem>
                         <artifactItem>
                            <groupId>org.apache.activemq</groupId>
@@ -388,7 +384,6 @@
                            <classifier>test-sources</classifier>
                            <excludes>**/META-INF/**</excludes>
                            <outputDirectory>src/test/java</outputDirectory>
-<!--                           <overWrite>true</overWrite>  -->
                         </artifactItem>
                      </artifactItems>
                   </configuration>
@@ -406,7 +401,7 @@
                 <patch>original.patch</patch>
              </patches>
              <strip>3</strip>
-             <targetDirectory>.</targetDirectory>
+             <targetDirectory>${basedir}</targetDirectory>
            </configuration>
            <executions>
              <execution>
@@ -424,28 +419,25 @@
             <artifactId>maven-surefire-plugin</artifactId>
             <configuration>
                <skipTests>${skipActiveMQ5Tests}</skipTests>
-               <excludes>
-                  <exclude>**/ReplicatedJMSFailoverTest.java</exclude>
-                  <exclude>org.apache.activemq/tests/util/*.java</exclude>
-               </excludes>
             </configuration>
          </plugin>
-         
+ 
          <plugin>
-			<artifactId>maven-clean-plugin</artifactId>
-			<version>2.6.1</version>
-			<configuration>
-			   <filesets>
-				  <fileset>
-					 <directory>src</directory>
-				  </fileset>
-				  <fileset>
-					 <directory>activemq-data</directory>
-				  </fileset>
-			   </filesets>
-			</configuration>
+            <artifactId>maven-clean-plugin</artifactId>
+            <version>2.6.1</version>
+            <configuration>
+               <filesets>
+                  <fileset>
+                     <directory>src</directory>
+                  </fileset>
+                  <fileset>
+                     <directory>activemq-data</directory>
+                  </fileset>
+               </filesets>
+            </configuration>
          </plugin>
       </plugins>
    </build>
 
 </project>
+
