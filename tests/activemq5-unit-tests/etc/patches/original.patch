@@ -164,7 +164,7 @@ index 0000000..927ed47
 +}
 +
 diff --git a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
-index 3eda490..ac12c96 100644
+index 3eda490..b6df30a 100644
 --- a/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
 +++ b/tests/activemq5-unit-tests/src/main/java/org/apache/activemq/broker/BrokerService.java
 @@ -57,6 +57,7 @@ import org.apache.activemq.ActiveMQConnectionMetaData;
@@ -297,7 +297,17 @@ index 3eda490..ac12c96 100644
      /**
       * Factory method to create the core region broker onto which interceptors
       * are added
-@@ -3043,4 +3068,22 @@ public class BrokerService implements Service {
+@@ -2365,8 +2390,7 @@ public class BrokerService implements Service {
+     }
+ 
+     protected TransportConnector createTransportConnector(URI brokerURI) throws Exception {
+-        TransportServer transport = TransportFactorySupport.bind(this, brokerURI);
+-        return new TransportConnector(transport);
++        return null;
+     }
+ 
+     /**
+@@ -3043,4 +3067,22 @@ public class BrokerService implements Service {
      public void setRejectDurableConsumers(boolean rejectDurableConsumers) {
          this.rejectDurableConsumers = rejectDurableConsumers;
      }
@@ -1744,6 +1754,13 @@ index 9dc50f9..272af1d 100755
  
      public TransportServer doBind(final URI location) throws IOException {
          try {
+diff --git a/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
+new file mode 100644
+index 0000000..82f81bf
+--- /dev/null
++++ b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
+@@ -0,0 +1 @@
++org.apache.activemq.core.protocol.openwire.OpenWireProtocolManagerFactory
 diff --git a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java b/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java
 index cbf4af3..5d1ec80 100644
 --- a/tests/activemq5-unit-tests/src/test/java/org/apache/activemq/ActiveMQSslConnectionFactoryTest.java
@@ -1797,11 +1814,3 @@ index feff243..84cedea 100755
          return consumeSession.createConsumer(consumerDestination);
      }
  }
-diff --git a/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
-new file mode 100644
-index 0000000..82f81bf
---- /dev/null
-+++ b/tests/activemq5-unit-tests/src/main/resources/META-INF/services/org.apache.activemq.spi.core.protocol.ProtocolManagerFactory
-@@ -0,0 +1 @@
-+org.apache.activemq.core.protocol.openwire.OpenWireProtocolManagerFactory
-
